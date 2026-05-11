@@ -9,6 +9,7 @@ import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 
 import java.util.List;
 
@@ -115,39 +116,34 @@ public class BoardController {
 
 
     /**
-     * 게시글 목록 화면 요청 (페이징)
-     * 
-     * Controller의 역할:
-     * - HTTP 요청 처리
-     * - 페이징 파라미터 처리 (page, size)
-     * - Service에 비즈니스 로직 위임
-     * - View에 데이터 전달 (페이징 정보 포함)
-     * 
-     * @param page 페이지 번호 (0부터 시작, 기본값: 0)
-     * @param size 페이지 크기 (기본값: 5)
-     * @param model View에 전달할 데이터
+     * 게시글 목록 화면 요청 (페이징 + 검색)
+     *
+     * 페이지 번호 규칙:
+     * - URL, 화면, Service 인자까지 모두 1-base (1, 2, 3 ...) 로 통일.
+     * - Spring Data JPA 의 0-base 는 Service 내부에서만 다룬다.
+     *   사용자/수강생이 0-base 를 직접 마주칠 일이 없다.
+     *
+     * @param page    페이지 번호 (1-base, 기본값: 1)
+     * @param size    페이지 크기 (기본값: 5)
+     * @param keyword 검색어 (제목 또는 내용, 없으면 null)
+     * @param model   View 모델
      * @return View 이름
      */
     @GetMapping({"/board/list", "/"})
     public String boardList(
-            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "1") int page,
-            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "5") int size,
-            @org.springframework.web.bind.annotation.RequestParam(required = false) String keyword,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "5") int size,
+            @RequestParam(required = false) String keyword,
             Model model) {
-        // 페이지 번호 변환: 사용자는 1부터 시작하는 페이지 번호를 사용하지만,
-        // Spring Data JPA의 Pageable은 0부터 시작하므로 1을 빼서 변환
-        int pageIndex = Math.max(0, page - 1);
-        
-        // Service에 비즈니스 로직 위임
-        // - 게시글 목록 조회 (페이징 처리, 검색 포함, 생성일 기준 내림차순 정렬)
-        // - 페이징 정보가 포함된 PageDTO 반환 (OSIV False 환경 대응)
-        BoardResponse.PageDTO boardPage = boardService.게시글목록조회(pageIndex, size, keyword);
-        
-        // View에 데이터 전달
-        // boardPage 객체에 페이징 정보와 게시글 목록이 모두 포함되어 있음
-        // keyword도 전달하여 검색어 유지 (페이지 이동 시 검색어 유지)
-        // keyword가 null이면 빈 문자열로 전달 (Mustache 템플릿 오류 방지)
+
+        // Service 에 1-base 페이지 번호를 그대로 전달.
+        // 0-base 변환과 keyword null/blank 분기는 Service 안에서 책임진다.
+        BoardResponse.PageDTO boardPage = boardService.게시글목록조회(page, size, keyword);
+
         model.addAttribute("boardPage", boardPage);
+        // keyword 가 null 이면 빈 문자열로 모델에 담는다.
+        //   이유 1) Mustache 에서 "{{keyword}}" 가 "null" 문자열로 출력되는 사고 방지
+        //       2) 페이지 링크와 검색창 input value 에 그대로 박을 수 있음
         model.addAttribute("keyword", keyword != null ? keyword : "");
         return "board/list";
     }

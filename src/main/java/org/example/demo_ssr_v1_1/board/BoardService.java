@@ -59,64 +59,71 @@ public class BoardService {
     private final ReplyRepository replyRepository;
 
     /**
-     * 게시글 목록 조회 (페이징)
-     * 
-     * OSIV False 환경 대응:
-     * - 트랜잭션 내에서 필요한 데이터를 모두 조회하고 DTO로 변환
-     * - JOIN FETCH로 Board와 User를 한 번의 쿼리로 함께 조회
-     * - 엔티티를 DTO로 변환하여 반환 (LAZY 로딩 문제 방지)
-     * 
-     * 트랜잭션:
-     * - 읽기 전용 트랜잭션 (readOnly = true)
-     * - 성능 최적화: 변경 작업이 없으므로 읽기 전용으로 설정
-     * 
-     * 페이징 처리:
-     * - Spring Data JPA의 Pageable을 사용하여 페이징 처리
-     * - 기본값: page=0 (첫 페이지), size=5 (페이지당 5개)
-     * - 정렬: 생성일 기준 내림차순 (최신순)
-     * 
-     * @param page 페이지 번호 (0부터 시작, 기본값: 0)
-     * @param size 페이지 크기 (기본값: 5)
-     * @return 페이징된 게시글 목록 DTO
-     */
-    /**
-     * 게시글 목록 조회 (페이징, 검색 포함)
-     * 
-     * @param page 페이지 번호 (0부터 시작)
-     * @param size 페이지 크기
-     * @param keyword 검색어 (제목 또는 내용, null 가능)
-     * @return 페이징된 게시글 목록 DTO
+     * 게시글 목록 조회 (페이징 + 검색)
+     *
+     * 페이지 번호 규칙:
+     * - 호출자(Controller)는 항상 1-base 페이지 번호를 넘긴다. (1, 2, 3 ...)
+     * - Spring Data JPA의 PageRequest는 0-base 이므로 이 메서드 안에서 -1 변환.
+     * - 0-base 변환은 이 한 곳에서만 일어나므로, 0/1 base 혼동이 코드 전체로 퍼지지 않는다.
+     *
+     * 방어 로직:
+     * - page < 1 이면 0 으로 보정 (음수, 0 방어)
+     * - size 는 1 ~ 50 으로 제한 (size=10000 같은 악성/오타 요청 방어)
+     *
+     * 검색 분기:
+     * - keyword 가 null 또는 공백뿐이면 전체 목록 조회
+     * - 키워드가 있으면 "제목 또는 내용" LIKE 검색 (대소문자 무시)
+     *
+     * @param page    페이지 번호 (1-base)
+     * @param size    페이지 크기
+     * @param keyword 검색어 (제목 또는 내용, null/빈문자열 가능)
+     * @return 페이징 정보 + 게시글 목록 DTO
      */
     @Transactional(readOnly = true)
     public BoardResponse.PageDTO 게시글목록조회(int page, int size, String keyword) {
-        // Pageable 생성 (페이지 번호, 페이지 크기, 정렬 기준)
-        // page는 0부터 시작하므로 사용자가 1을 입력하면 0으로 변환
-        // size는 기본값 5, 최소 1, 최대 50으로 제한
-        
-        // 페이지 번호가 음수가 되는 것을 막습니다. 
-        // Math.max(A, B)는 A와 B 중 더 큰 숫자를 선택합니다.
-        int validPage = Math.max(0, page);
-        
-        // 최대값 제한 (Math.min) - "상한선" (누군가 1만가 달라고 조작한다면 악의적으로 부담이 될 수 있다)
-        // 최소값 제한 (Math.max) - "하한선" (사용자가 0개나 -10개 달라고 요청함)
+        // 화면 기준으로 넘어오는 값(사용자에게 보이는 기준): 0이 아니라 1부터 시작.
+        // 반면 Spring Data 의 PageRequest 는 0부터 시작 — 내부적으로 OFFSET = pageIndex * size
+        // 로 SQL 을 만드는데, DB 의 OFFSET 자체가 0부터이기 때문이다.
+        // 그래서 여기서 -1 해서 0-base 로 맞춰준다.
+        // Math.max(0, ...) 는 사용자가 ?page=-5 같은 음수를 보내도 음수 인덱스가 안 되게 막는 방어.
+        int pageIndex = Math.max(0, page - 1);
+
+        // size 안전 범위 보정. "기본값 5" 는 이 줄이 아니라
+        // Controller 의 @RequestParam(defaultValue = "5") 가 정해 준다.
+        // 이 줄은 단지 "1보다 작거나 50보다 큰 값이 들어와도 안전 범위로 잘라낸다" 가 전부.
+        // 예) ?size=0     → 1 로 보정
+        //     ?size=10000 → 50 으로 보정
         int validSize = Math.max(1, Math.min(50, size));
-        
-        // 정렬 기준: 생성일 기준 내림차순 (최신순)
+
+        // 정렬: 생성일 내림차순 (최신순)
         Sort sort = Sort.by(Sort.Direction.DESC, "createdAt");
-        Pageable pageable = PageRequest.of(validPage, validSize, sort);
-        
-        // 검색어가 있으면 검색, 없으면 전체 조회
+
+        // [Pageable 이란?]
+        // "어떤 페이지를(pageIndex), 몇 개씩(validSize), 어떤 정렬로(sort) 가져올지"
+        // 를 한 묶음으로 표현한 Spring Data 의 표준 페이징 요청 인터페이스.
+        // Repository 메서드에 인자로 넘기면 Spring Data 가 LIMIT + OFFSET SQL 을 자동 생성해 준다.
+        Pageable pageable = PageRequest.of(pageIndex, validSize, sort);
+
+        // [검색 분기]
+        // keyword 가 null 또는 공백뿐이면 전체 조회 쿼리를 쓴다.
+        // 빈 문자열로 LIKE '%%' 를 돌리면 결과는 같지만, 검색 SQL/카운트 쿼리가 매번 도는 게
+        // 비효율적이고 의도도 흐려진다. 그래서 "검색인지 아닌지" 를 여기서 명확히 분기한다.
         Page<Board> boardPage;
-        if (keyword != null && !keyword.trim().isEmpty()) {
-            // 검색어가 있는 경우: 제목 또는 내용에서 검색
-            boardPage = boardRepository.findByTitleContainingOrContentContaining(keyword.trim(), pageable);
-        } else {
-            // 검색어가 없는 경우: 전체 조회
+        if (keyword == null || keyword.isBlank()) {
+            // 검색어 없음 → 전체 목록
             boardPage = boardRepository.findAllWithUserOrderByCreatedAtDesc(pageable);
+        } else {
+            // 검색어 있음 → 제목 또는 내용 LIKE 검색 (대소문자 무시)
+            boardPage = boardRepository.findByTitleContainingOrContentContaining(keyword.trim(), pageable);
         }
-        
-        // 트랜잭션 내에서 Page 객체를 PageDTO로 변환
-        // PageDTO 생성자에서 엔티티를 DTO로 변환
+
+        // [왜 Page<Board> 를 그대로 안 쓰고 PageDTO 로 한 번 더 감싸나?]
+        //  1) Board 는 DB 용 엔티티. 화면 모델과 분리해야 password 같은 민감 필드가 새지 않는다.
+        //  2) createdAt(Timestamp) 을 보기 좋은 문자열로 포맷팅하는 일이 ListDTO 안에 있다.
+        //  3) Mustache 는 산술/비교 연산을 못 해서 prevPage, nextPage, active 같은 값을
+        //     자바 쪽에서 미리 계산해 줘야 한다 — 그 계산 결과를 담을 그릇이 PageDTO 다.
+        //  4) OSIV 가 false 라 트랜잭션이 끝나면 LAZY 필드 접근이 막힌다. DTO 패턴이면
+        //     화면이 엔티티를 직접 만지지 않으니 미래에 LAZY 필드가 늘어나도 사고가 적다.
         return new BoardResponse.PageDTO(boardPage);
     }
 
